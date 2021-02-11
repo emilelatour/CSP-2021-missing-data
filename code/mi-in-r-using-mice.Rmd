@@ -1,0 +1,1128 @@
+---
+title: "Multiple imputation in R using `mice`"
+subtitle: "CSP 2021"
+author: "Emile Latour"
+date: "February 17, 2021"
+output: 
+  slidy_presentation: 
+    theme: yeti
+    highlight: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = TRUE,  
+  tidy       = FALSE, 
+  dpi        = 96,  
+  fig.width  = 7,  
+  fig.height = 5,  
+  out.width  = "70%",  
+  fig.align  = "center", 
+  dev = "png", 
+  NULL
+)
+
+```
+
+# Load the packages
+
+Here we load that packages that we will be using during the analysis. See section titled "Links and references" for more info on the packages
+
+```{r load-packages, message=FALSE, warning=FALSE}
+
+library(tidyverse)       # packages ggplot2, dplyr, tidyr, readr, purrr, tibble, 
+# stringr, and forcats
+library(broom)           # functions tidy(), glance(), augment()
+library(janitor)         # for working with dirty data 
+library(here)            # simpler way to find your files
+library(skimr)           # Compact and Flexible Summaries of Data
+library(DT)              # Helpful for looking at large data frames
+
+library(mice)            # Multiple imputation using Fully Conditional Specification
+library(naniar)          # structures, summaries, and visualizations for missing data 
+library(VIM)             # Visualization and Imputation of Missing Values
+library(finalfit)        # Check for associations between missing and observed data.
+```
+
+# The data
+
+A simulated data set of Medicaid enrollment data that has been matched with Electronic Health Records (EHR) for the purposes of comparing the Medicaid claims data with the EHR to ensure accuracy/agreement.
+
+The data contains:
+
++ Demographic information: age, sex, race, ethnicity, language spoken, and Federal poverty level status (FPL).
++ Eligible (Yes/No) for Breast cancer screening, Cholesterol screening, and Flu vaccine. 
++ Received (Yes/No) according to Medicaid data for each. 
++ Received (Yes/No) according to EHR data for each. 
++ Total cholesterol values for those that received cholesterol screening in the EHR.
+
+## Based on real data
+
+To provide a practical real-world example, he data used here was based on an actual data set, but due to complications with using patient data and privacy, all data here has been simulated and similarities to the original data are unintentional.
+
+# Data preparation
+
+## Load the data
+
+Using the `here` package to construct the path to the data set. Specifying the column types ahead of time.
+
+```{r load_data}
+data <- readr::read_csv(
+  file = here::here("data", 
+                    "ehr-and-claims_simulated-data_csp-2021.csv"), 
+  col_types = cols(pat_id = col_character(),
+                   age = col_double(),
+                   sex = col_character(),
+                   race_eth = col_character(),
+                   language = col_character(),
+                   fpl = col_character(),
+                   age_f = col_character(),
+                   breast_eligibility = col_double(),
+                   flu_eligibility = col_double(),
+                   cholesterol_eligibility = col_double(),
+                   breast_claims = col_double(),
+                   flu_claims = col_double(),
+                   cholesterol_claims = col_double(),
+                   breast_ehr = col_double(),
+                   flu_ehr = col_double(),
+                   cholesterol_ehr = col_double(), 
+                   cholesterol_total = col_double()))
+
+```
+
+
+## Take a peak
+
+Take note of 
+
++ The number of rows and columns, 
++ Variable names, 
++ Types of variables, 
++ Some of the data values
+
+```{r}
+dplyr::glimpse(data)
+```
+
+## Light data cleaning
+
+Convert coded variables to `factor` type.
+
+```{r}
+data <- data %>% 
+  mutate(sex = factor(sex, 
+                      levels = c("Female", "Male")), 
+         race_eth = factor(race_eth, 
+                           levels = c("Hispanic",
+                                      "Non-Hispanic, Black",
+                                      "Non-Hispanic, Other",
+                                      "Non-Hispanic, White")),
+         language = factor(language, 
+                           levels = c("English", 
+                                      "Spanish", 
+                                      "Other")),
+         fpl = factor(fpl, 
+                      levels = c("<=138% FPL", 
+                                 ">138% FPL")), 
+         age_f = factor(age_f, 
+                        levels = c("19-<34", 
+                                   "35-<50", 
+                                   "51-<64")), 
+         dplyr::across(.cols = dplyr::ends_with("_eligibility"), 
+                       .fns = ~ factor(., 
+                                       levels = c(1, 0), 
+                                       labels = c("Yes", "No"))), 
+         dplyr::across(.cols = dplyr::ends_with("_claims"), 
+                       .fns = ~ factor(., 
+                                       levels = c(1, 0), 
+                                       labels = c("Yes", "No"))), 
+         dplyr::across(.cols = dplyr::ends_with("_ehr"), 
+                       .fns = ~ factor(., 
+                                       levels = c(1, 0), 
+                                       labels = c("Yes", "No")))
+  )
+
+# Good step I always do to ensure consistent, clean naming conventions
+data <- data %>% 
+  janitor::clean_names()
+```
+
+## One more peak
+
+Take another glimpse at the data and note how the values have changed.
+
+```{r}
+dplyr::glimpse(data)
+
+```
+
+# Skim the data
+
+`skimr::skim()` is a nice alternative to the base R function `summary()`. Though it doesn't always play nicely depending on your operating system...
+
+```{r}
+# With spark graphs if system allows
+# skimr::skim(data)
+
+# Without spark graphs
+skimr::skim_without_charts(data)
+```
+
+# Exploratory data analysis (EDA)
+
+One of the most important and involved steps in performing multiple imputation. See slide deck on performing EDA of data with missingness. 
+
+# Multiple imputation in R with `mice` package
+
+The aims of this session are to 
+
++ Show the detailed steps in involved in setting up multiple imputation in R with the `mice` package, 
++ Talk through the 7 considerations when specifying the imputation models, 
++ Review the performance and convergence of the `mice` algorithm, 
++ Check imputation results, 
++ Show how to pool statistics from multiply imputed data sets for Kappa and odds ratios by hand
++ Show how to pool statistics from multiply imputed data sets for odds ratios using logistic regression and the `mice` functionality.
+
+# Set the seed for reproducibility
+
+Set the seed to ensure that all results, figures, etc. are reproducible.
+
+```{r}
+seed_for_imp <- 8675309
+set.seed(seed_for_imp)
+```
+
+# Set the number of iterations and the number of imputations
+
+Tune the imputation using the default settings to begin with. 
+
+The `mice` algorithm tends to converge rather quickly. Advice is to set the iterations high enough that you see convergence but not so high that it will drastically increase the computation time.
+
+Once the imputation model is specified and convergence issues are addressed, increase the number of imputations for the final model. Allison suggests: __the number of imputations should be similar to the percentage of cases that are incomplete__. This can also make for long computation time, which is an appropriate price to pay for imputation with large missing.
+
+In our data set the percentage of cases that are incomplete was:
+
+```{r}
+data %>% 
+  naniar::miss_prop_summary()
+
+```
+
+Stick with the defaults for now.
+
+```{r}
+imp_num <- 5   # number of imputations, dflt = 5
+iter_num <- 5  # number of iterations, dflt = 5
+```
+
+# Naive first pass
+
+Start with an "initial" empty imputation to see what the software does by default. Also, this provides some objects to help in setting up the final imputation model.
+
+See what is contained in the `init` object that contains the imputations and data about the setup.
+
+```{r}
+init <- mice::mice(data, maxit = 0)
+names(init)
+
+```
+
+We already see a warning which is due to potential collinearity between variables in our data set: `age` and `age_f`.
+
+# What is in the imputation object
+
+We are most interested in the `methods`, `predictorMatrix`, and the `visitSequence` which we will work with and adjust to help set up the final imputation models.
+
+```{r}
+meth <- init$method
+pred_mat <- init$predictorMatrix
+visit_order <- init$visitSequence
+```
+
+# `methods`
+
+These are the default model specifications that the software chose based on data type.
+
+```{r}
+meth[meth != ""]  # shown here as subset of those to be imputed
+```
+
+
+We can see the defaults that the package chooses for the variables with missing data:
+
++ age -- Predictive mean matching (`pmm`), numeric variable type.
++ sex -- Logistic regression (`logreg`), factor with 2 levels.
++ race_eth -- Multinomial logistic regression (`polyreg`), factor with > 2 levels.
++ fpl -- Logistic regression (`logreg`), factor with 2 levels.
++ age_f -- Multinomial logistic regression (`polyreg`), factor with > 2 levels.
+
+See [link to Van Buuren's text online](https://stefvanbuuren.name/fimd/sec-modelform.html) for all available.
+
+#### A note on predictive mean matching (pmm)
+
+According to Van Buuren: `pmm` is robust to transformation of target variables and it can handle discrete variables. `pmm` will not impute outside of the observed data range.
+
+> Predictive mean matching calculates the predicted value of target variable Y according to the specified imputation model. For each missing entry, the method forms a small set of candidate donors (typically with 3, 5 or 10 members) from all complete cases that have predicted values closest to the predicted value for the missing entry. One donor is randomly drawn from the candidates, and the observed value of the donor is taken to replace the missing value. The assumption is the distribution of the missing cell is the same as the observed data of the candidate donors. (Van Buuren, Flexible Imputation of Missing Data)
+
+# `predictorMatrix`
+
++ Variables to be imputed are on the left side (vertical)
++ Possible predictors are listed along the top (horizontal)
++ Grid of `1`s and `0`s indicate which predictors were selected by the software
+
+```{r}
+pred_mat %>% 
+  DT::datatable()
+```
+
+# `visitSequence`
+We can also check the visit sequence to see the order that variables are "visited" in the imputation process. Default is the order of the variables in the data frame.
+
+```{r}
+visit_order
+```
+
+# Specify the imputation model
+
+In Van Buuren's [vignette](https://www.jstatsoft.org/article/view/v045i03) and [book](https://stefvanbuuren.name/fimd/), he lays out steps to follow when setting up multiple imputation. 
+
+Here we will go through the process with our example data to 
+
+* Step 1 - Decide if the missing at random (MAR) assumption is reasonable
+* Step 2 - Decide on the form of the imputation model
+* Step 3 - Decide the set of predictors to include in the imputation model
+* Step 4 - Decide how to impute variables that are functions of other (incomplete) variables
+* Step 5 - Decide the order to impute the variables
+* Step 6 - Decide the number of iterations
+* Step 7 - Decide on the number of multiply imputed data sets
+
+
+# Step 1 - Decide if the missing at random (MAR) assumption is reasonable
+
+Assuming MAR is typically a reasonable place to start. There is literature on sensitivity analysis with the imputations to examine if this assumption is met. And there are techniques to model the missing mechanism with the imputation if there is violation. This work is outside the scope of what I hope to share here.
+
+Exploring the missingness is so important for this first step!
+
+# Step 2 - Decide on the form of the imputation model
+
+We want to decide the form of the model used to impute the missing values of each variable. We saved the default choices from before.
+
+```{r}
+meth[meth != ""]
+```
+
+These look pretty reasonable given what we know of our data set. We could change the settings to the `meth` object if we liked:
+
+```{r}
+meth[c("age")] <- "norm.nob"
+meth[meth != ""]
+```
+
+Change it back before proceeding since we want to use predictive mean matching for continuous data.
+
+```{r}
+meth[c("age")] <- "pmm"
+meth[meth != ""]
+```
+
+# Step 3 - Decide the set of predictors to include in the imputation model
+
+What variables to include in the multiple imputation model?
+
+The advice is to include as many relevant variables as possible. One should include all variables that are in your scientific model of interest that will be used after imputation. Also variables that are related to the missingness of the variables you are imputing (i.e. those known to be related to nonresponse). Van Buuren has more advice on this and worth reading, [vignette](https://www.jstatsoft.org/article/view/v045i03) and [book](https://stefvanbuuren.name/fimd/)
+
+Including as many predictors as possible makes the MAR assumption more reasonable. But with larger data sets, this is not advisable for computation purposes. Van Buuren suggests that 15 to 25 variables will work well. He also offers advice to cull that list.
+
+**Discuss with collaborators and lead researchers with domain knowledge of your data**
+
+# Step 3 - Decide the set of predictors to include in the imputation model
+
+I came across these from some class notes online:
+
+> The imputation model should include variables that are:
+> 
+> + crucial to the analysis
+> + highly predictive of variables crucial to the analysis
+> + highly predictive of missingness
+> + describe special features of the sample design
+> 
+> The model should be general enough to preserve any associations among variables (two-, three-, or higher- way associations) that may be of interest in later analyses.
+
+# Step 3 - Decide the set of predictors to include in the imputation model
+
+In our case, we are on our own. To aid in these decisions the `mice` package has a function that produces a “quick predictor matrix” that is useful for dealing with data sets with large number of variables. The software chooses by calculating two correlations with the available cases, taking the larger, and seeing if it meets a minimum threshold. Type `?mice::quickpred` in the R console for better description.
+
+Below I run the `quickpred()` to see what the software chooses. I just show the rows and columns 
+
+```{r}
+pred_guess <- data %>% 
+  mice::quickpred()
+
+
+pred_guess[rowSums(pred_guess) > 0, colSums(pred_guess) > 0] %>% 
+  DT::datatable()
+```
+
+# In practice
+
+In my work, I've used a combination of the predictor matrix and collaborators input to select predictors for the imputation model. 
+
+Note that the models can have different sets of predictors.
+
+From the help details section for `mice::quickpred`:
+
+>The function is designed to aid in setting up a good imputation model for data with many variables.
+>
+>Basic workings: The procedure calculates for each variable pair (i.e. target-predictor pair) two correlations using all available cases per pair. The first correlation uses the values of the target and the predictor directly. The second correlation uses the (binary) response indicator of the target and the values of the predictor. If the largest (in absolute value) of these correlations exceeds mincor, the predictor will be added to the imputation set. The default value for mincor is 0.1.
+>
+>In addition, the procedure eliminates predictors whose proportion of usable cases fails to meet the minimum specified by minpuc. The default value is 0, so predictors are retained even if they have no usable case.
+>
+>Finally, the procedure includes any predictors named in the include argument (which is useful for background variables like age and sex) and eliminates any predictor named in the exclude argument. If a variable is listed in both include and exclude arguments, the include argument takes precedence.
+
+# Check that the included variables make sense
+
+Ensure that patient ID (`pat_id`) doesn't get included as a predictor in any of the models. 
+
+```{r}
+pred_guess[, "pat_id"] <- 0
+
+pred_guess[rowSums(pred_guess) > 0, colSums(pred_guess) > 0] %>% 
+  DT::datatable()
+```
+
+# Include the variables that looked good in our EDA
+
+In the slides on EDA we saw that:
+
++ `race_eth` look like good predictors for `age` (96.6%). 
++ `race_eth` look like good predictors for `sex` (96.7%). 
++ `age` and `sex` look like good predictors for `race_eth` (88.0% and 92.2%).
++ `age` and `sex` and `race_eth` look like good predictors for `fpl` (89.5% and 93.1% and 95.8%).
+* Influx and Outflux showed that `race_eth`, and `sex` would be potentially helpful.
+
+```{r}
+
+pred_guess["age", c("race_eth")] <- 1
+pred_guess["sex", c("race_eth")] <- 1
+pred_guess["race_eth", c("age", "sex")] <- 1
+pred_guess["race_eth", c("age", "sex")] <- 1
+pred_guess["fpl", c("age", "sex", "race_eth")] <- 1
+
+pred_guess[rowSums(pred_guess) > 0, colSums(pred_guess) > 0] %>%
+  DT::datatable()
+
+```
+
+
+# Step 4 - Decide how to impute variables that are functions of other (incomplete) variables
+
+Transformations, sum scores, etc. were not used in this data set so not much to consider here. In some cases, there can be a lot to think about particularly if a variable is transformed solely to meet the normality assumption in a regression model. So do a literature review if this issue applies to you.
+
+Need to handle the derived variable `age_f` which is calculated from `age`. See chapter in Van Buuren text for a few different methods. Here I will use "passive imputation" to impute `age_f` as a derived variable.
+
+```{r}
+
+# User defined function to create age_f, a categorical version of the continuous
+# age variable
+calc_age_f <- function(x) { 
+  cut(x, 
+      breaks = c(19, 35, 50, 65), 
+      right = FALSE, 
+      labels = c('19-<34', '35-<50', '51-<64'))
+}
+
+meth["age_f"] <- "~I(calc_age_f(age))"
+meth[meth != ""]
+```
+
+# Revisit the predictor matrix
+
+Since it's based on other variables in the data, there will be collinearity in the imputation model when `age_f` is included. The software should detect this automatically, give a warning, and drop the variable automatically. Best to ensure that it is not included in the imputation model anyways.
+
+I also don't want to impute `cholesterol_total` or include it in any of my imputation models.
+
+```{r}
+# Exclude as predictors in all models
+pred_guess[, "age_f"] <- 0  
+pred_guess[, "cholesterol_total"] <- 0
+
+# Exclude from being imputed
+pred_guess["cholesterol_total", ] <- 0
+
+pred_guess[rowSums(pred_guess) > 0, colSums(pred_guess) > 0] %>% 
+  DT::datatable()
+```
+
+
+# Step 5 - Decide the order to impute the variables
+
+The default in the software goes by appearance in the data set left to right. It can be overwritten per the user’s direction. This becomes more of an issue if there is a longitudinal nature to the data set where missingness at an earlier time point would affect the missingness later. So impute early to later.
+
+I will examine the imputation order by magnitude of missingness (low to high and high to low). To see if there is a difference in performance or convergence or any impact to the estimates. I usually default to imputing from highest percent missing to lowest.
+
+```{r}
+visit_order
+```
+
+Override this by ordering based on magnitude of missing that we got from the EDA
+
+```{r}
+data %>% 
+  naniar::miss_var_summary() %>% 
+  dplyr::filter(n_miss > 0)
+```
+
+```{r}
+visit_order <- c("fpl", 
+                 "age", 
+                 "age_f", 
+                 "sex", 
+                 "race_eth")
+visit_order
+```
+
+# Step 6 - Decide the number of iterations
+
+This is to ensure convergence. The default is 5. 10 to 20 are recommended. 
+
+```{r}
+iter_num
+```
+
+# Step 7 - Decide on the number of multiply imputed data sets
+
+The rule of thumb from more recent authors is that the number of imputations should be similar to the percentage of cases (observations) that are incomplete (at least 5).
+
+The software default is 5 and I typically use that when running for the first time and when checking convergence to save time. 
+
+We had set this previously above.
+
+```{r}
+imp_num
+```
+
+
+# Run the algorithm
+
+All the setup work has been done and considerations made. Using the specifications that saved in objects above, we will run the mice command to impute the data sets.
+
+```{r}
+imp <- mice::mice(data = data, 
+                  m = imp_num,             # number of imputations, dflt = 5
+                  method = meth,           # specify the method
+                  predictorMatrix = pred_guess, 
+                  visitSequence = visit_order, 
+                  seed = seed_for_imp, 
+                  maxit = iter_num,        # number of iterations, dflt = 5
+                  print = FALSE)
+```
+
+## Check for any issues or warnings
+
+```{r}
+imp$loggedEvents
+```
+
+# Check convergence
+
+We plot the values of mean and standard deviation for each variable by number of iteration. We want to look for mixing of the lines and we do not want to see any trend.
+
+I tend to think about issues with convergence similar to those that come up with any kind of modeling specifically combinations of categorical predictors that cause (almost perfect) data separation.
+
+```{r}
+plot(imp, c("fpl", 
+            "age", 
+            "age_f", 
+            "sex", 
+            "race_eth"))
+```
+
+# Extend the number of iterations and check again
+
+Hard to tell from just 5 iterations. But checking above there was nothing that immediately jumped out. 
+Let's run for more iterations to make sure and see when things start to settle down if at all.
+
+```{r}
+imp40 <- mice::mice.mids(imp, 
+                         maxit = 35, 
+                         print = FALSE)
+
+
+plot(imp40, c("fpl", 
+              "age", 
+              "age_f", 
+              "sex", 
+              "race_eth"))
+```
+
+# Diagnostics
+
+See Van Buuren [chapter 6.6](https://stefvanbuuren.name/fimd/sec-diagnostics.html). The `mice` package contains a few functions to help graphically assess the differences between the observed and imputed data.
+
+Discrepancies may be due to the imputation model, missingness assumption, or both. 
+
+# For continous variables
+
+## Best for small data sets
+
+```{r}
+stripplot(imp, age)
+```
+
+## Better for larger data sets
+
+```{r}
+bwplot(imp, age)
+```
+
+```{r}
+densityplot(imp, ~ age)
+```
+
+# Categorical variables
+
+Not a lot out there for categorical variables. It's not ideal but you can use the `densityplot` function on categorical variables to get and idea..
+
+```{r}
+densityplot(imp, ~ sex)
+```
+
+I've made plots on my own which gets a little hard to explain. The general idea is to 
+
++ create a missing/observed indicator in the original data 
++ attach the indicator to each data set (imputed or original) using a record ID
+
+
+```{r}
+# Add a column to the data to indicate if there were missing values for sex
+missing_sex <- data %>% 
+  dplyr::select(pat_id, sex) %>% 
+  naniar::add_any_miss(data = ., 
+                       sex, 
+                       missing = "imputed", 
+                       complete = "observed")
+
+# Now have an indicator for missing age. 
+
+# produces a data set where imputed data sets are stacked vertically. 
+imp_long <- mice::complete(imp, "long")
+
+# Join the missing indicator to the long data
+imp_long <- missing_sex %>% 
+  dplyr::select(pat_id, any_miss_vars) %>% 
+  dplyr::left_join(., 
+                   imp_long, 
+                   by = "pat_id")
+
+
+# Similar to the strip plot idea
+ggplot() + 
+  geom_jitter(data = imp_long %>% dplyr::filter(any_miss_vars == "observed"), 
+              aes(x = .imp, 
+                  y = sex), 
+              width = 0.10, 
+              height = 0.25, 
+              colour = "goldenrod", 
+              alpha = 0.4) + 
+  geom_jitter(data = imp_long %>% dplyr::filter(any_miss_vars == "imputed"), 
+              aes(x = .imp, 
+                  y = sex), 
+              width = 0.10, 
+              height = 0.25, 
+              colour = "darkblue", 
+              alpha = 0.7)
+```
+
+```{r, fig.asp=1.618}
+# Plotted another way
+
+ggplot(data = imp_long, 
+       aes(x = sex)) + 
+  geom_bar(stat = "count") + 
+  facet_grid(.imp ~ any_miss_vars)
+```
+
+# Final imputation model
+
+Once you are settled on the imputation model and reviewed the process for convergence, you are ready to create the multiple imputations. Double check your inputs, increase the number of imputations to perform.
+
+```{r, eval=FALSE}
+  imp_final <- mice::mice(data = data, 
+                          m = 40,             # number of imputations, dflt = 5
+                          method = meth,           # specify the method
+                          predictorMatrix = pred_guess, 
+                          visitSequence = visit_order, 
+                          seed = seed_for_imp, 
+                          maxit = 20,        # number of iterations, dflt = 5
+                          print = FALSE)
+#    user  system elapsed 
+# 450.477  61.924 515.250
+```
+
+# Save the imputation results
+
+Save the results to avoid having to re-run the multiple imputations.
+
+```{r, eval=FALSE}
+save(imp_final,  
+     file = here::here("data", 
+                       "imp-data", 
+                       "imp_final.rda"))
+```
+
+# Re-load the imputation results
+
+We will use final imputation data `imp_final` for the rest of the slides.
+
+```{r}
+load(file = here::here("data", 
+                       "imp-data", 
+                       "imp_final.rda"))
+
+plot(imp_final)
+```
+
+# Analyzing imputed data sets
+
+Rubin's Rules for pooling were covered in Miguel's slides. 
+
+
+Also covered in Van Buuren: [vignette](https://www.jstatsoft.org/article/view/v045i03) and [book](https://stefvanbuuren.name/fimd/)
+
+
+# Steps to pool by hand with `mice`
+
+1. Figure out how to obtain the estimated statistic of interest and it's standard error. 
+    + I often end up writing a function to get at these cleanly. 
+    + Test it on the complete data.
+
+2. Loop over each imputed data sets. 
+    + For each imputation, obtain the estimate and standard error
+
+3. Combine using Rubin's rules.
+
+# Analyzing imputed data sets
+
+Here we will look at:
+
++ Calculating Kappa statistics which need to be done by hand
++ Calculating an Odds Ratio by hand with a 2x2 table
++ Calculating an Odds Ratio using logistic regression and `mice`
+
+# Kappa
+
+Here we are interested in the agreement between the claims data and the EHR data. 
+
+We did not impute the claims and EHR, but we did impute demographics. So let's compare stratified agreement with complete case data and with multiply imputed data.
+
+Agreement along the diagonal: Both sources say "Yes" or "No". Kappa is considered "chance-adjusted" agreement. 
+
+Chosen here because it was of interest with the original study, but, also, because we will not transform kappa before pooling: simpler example.
+
+```{r}
+tab <- data %>% 
+  dplyr::filter(sex == "Female") %>% 
+  with(., table(breast_claims, 
+                breast_ehr))
+
+tab
+```
+
+# Kappa from complete case
+
+```{r}
+complete_kappa_res <- tab %>% 
+  psych::cohen.kappa() %>% 
+  broom::tidy() %>% 
+  janitor::clean_names() %>% 
+  dplyr::filter(type == "unweighted") %>% 
+  dplyr::select(kappa = estimate, 
+                lower_ci = conf_low, 
+                upper_ci = conf_high)
+
+complete_kappa_res
+
+
+```
+
+# Kappa from multiple impuation
+
+Need to get the estimate and standard error for the statistic of interest from each imputed data set.
+
+I've found that it's best to create a wrapper function and test it on the original data first
+
+```{r}
+# Wrapper function to 
+# Filter the data set
+# Calculate Kappa and the asymptotic SE
+calc_kappa <- function(data, x, y) { 
+  
+  data_filtered <- data %>% 
+    dplyr::filter(sex == "Female")
+  
+  tab <- table(data_filtered[[x]], data_filtered[[y]])
+  
+  k_res <- psych::cohen.kappa(x = tab)
+  
+  tibble::tibble(n = k_res$n.obs, 
+                 kappa = k_res$kappa, 
+                 se = sqrt(k_res$var.kappa) # Confirmed correct with vcd package
+  )
+  
+}
+```
+
+```{r}
+calc_kappa(data = data, 
+           x = "breast_claims", 
+           y = "breast_ehr")
+```
+
+
+# Kappa from multiple impuation
+
+Obtain the estimate and standard error for each imputed data set
+
+```{r}
+
+# Set up for pooling
+m <- imp_final$m
+Q <- rep(NA, m)
+U <- rep(NA, m)
+
+for (i in 1:m) {
+  
+  kappa_res <- calc_kappa(data = complete(imp_final, i), 
+                          x = "breast_claims", 
+                          y = "breast_ehr")
+  
+  Q[i] <- kappa_res$kappa
+  
+  U[i] <- (kappa_res$se) ^ 2         # (standard error of estimate)^2
+}
+
+```
+
+```{r}
+Q
+```
+
+```{r}
+U
+```
+
+## Another way to loop
+
+```{r}
+# A more "tidyverse-y" way
+imp_final %>% 
+  mice::complete("all") %>% 
+  purrr::map_dfr(.x = ., 
+                 .f = ~ calc_kappa(data = ., 
+                                   x = "breast_claims", 
+                                   y = "breast_ehr"), 
+                 .id = "m") %>% 
+  mutate(Q = kappa, 
+         U = se ^ 2) 
+```
+
+# `mice::pool.scalar`
+
+Pass the estimates and standard errors to `mice::pool.scalar`
+
+```{r}
+pooled_est <- mice::pool.scalar(Q, U, n = nrow(nhanes), k = 1)  # Barnard-Rubin 1999
+```
+
+```{r}
+# Estimated pooled Kappa
+pooled_est$qbar
+
+# 95% Confidence interval
+pooled_est$qbar + c(-1.96, 1.96) * sqrt(pooled_est$t)
+```
+
+Per `?mice::pool.scalar`, returns a list with components: 
+
++ `m` is the number of imputations. 
++ `qhat` contains the `m` univariate estimates of repeated complete data analyses. 
++ `u` contains the corresponding `m` variances of the univariate estimates. 
++ `qbar` is the pooled univariate estimate, formula (3.1.2) Rubin (1987). 
++ `ubar` is the mean of the variances (i.e. the pooled within-imputation variance), formula (3.1.3) Rubin (1987). 
++ `b` is the between-imputation variance, formula (3.1.4) Rubin (1987). 
++ `t` is the total variance of the pooled estimated, formula (3.1.5) Rubin (1987). 
++ `r` is the relative increase in variance due to nonresponse, formula (3.1.7) Rubin (1987). 
++ `df` is the degrees of freedom for t reference distribution, formula (3.1.6) Rubin (1987) or method of Barnard-Rubin (1999) (if method = "smallsample"). 
++ `Component `fmi` is the fraction missing information due to nonresponse, formula (3.1.10) Rubin (1987).
+
+# Compare with complete case analysis
+
+```{r}
+combined_kappa_res <- tibble::tibble(kappa = pooled_est$qbar, 
+                                     lower_ci = pooled_est$qbar + -1.96 * sqrt(pooled_est$t), 
+                                     upper_ci = pooled_est$qbar + 1.96 * sqrt(pooled_est$t)) %>% 
+  dplyr::bind_rows(., 
+                   complete_kappa_res) %>% 
+  mutate(scenario = c("mi", "complete"))
+
+combined_kappa_res
+
+```
+
+```{r}
+ggplot(data = combined_kappa_res, 
+       aes(x = kappa, 
+           y = scenario)) + 
+  geom_errorbar(aes(xmin = lower_ci, xmax = upper_ci), 
+                width = 0.05) + 
+  geom_point(size = 2) + 
+  scale_x_continuous(limits = c(0, 1))
+
+```
+
+# Even more by hand
+
+## Point estimate
+
+$$\bar{\theta} = \frac{1}{m} \sum_{m=1}^{m} \hat{\theta}_{m}$$
+
+We have all the estimates that we need to do this by hand using Rubin's Rules
+
+```{r}
+pooled_est$m
+pooled_est$qhat
+```
+
+```{r}
+est <- (1 / pooled_est$m) * sum(pooled_est$qhat)
+est
+```
+
+This is the same as we saw above
+
+```{r}
+pooled_est$qbar
+```
+
+# Even more by hand
+
+### Within variance
+
+$$\bar{V} = \frac{1}{m} \sum_{m=1}^{m} V_{m}$$
+
+```{r}
+pooled_est$u
+
+v_w <- (1 / pooled_est$m) * sum(pooled_est$u)
+v_w
+
+pooled_est$ubar
+```
+
+### Between variance
+
+$$B = \frac{1}{m - 1} \sum_{m=1}^{m} {(\hat{\theta}_{m} - \bar{\theta})} ^ 2$$
+
+```{r}
+v_b <- (1 / (pooled_est$m - 1)) * sum((pooled_est$qhat - pooled_est$qbar) ^ 2)
+v_b
+
+pooled_est$b
+```
+
+### Total variance
+
+$$T = \bar{V} + (1 + {m}^{-1})B$$
+
+```{r}
+v_w + (1 + (1 / pooled_est$m)) * v_b
+
+pooled_est$t
+```
+
+# Odds ratio by hand
+
+Trick with odds ratio is to calculate the log-odds, then pool, then exponentiate.
+
+## First write a function
+
+```{r}
+# Simple function to calculate the log(odds ratio) and approximate standard error
+calc_ln_or <- function(data, x, y) { 
+  
+  tab <- table(data[[x]], data[[y]])
+  
+  n_11 <- tab[1, 1]
+  n_12 <- tab[1, 2]
+  n_21 <- tab[2, 1]
+  n_22 <- tab[2, 2]
+  
+  # or <- (n_11 * n_22) / (n_12 * n_21)
+  # Flipping the odds ratio to have the reference levels match
+  or <- (n_12 * n_21) / (n_11 * n_22)
+  ln_or <- log(or)
+  
+  # approximate standard error for ln(or)
+  se_ln_or <- sqrt((1 / n_11) + (1 / n_12) + (1 / n_21) + (1 / n_22))
+  
+  tibble::tibble(ln_or = ln_or, 
+                 se_ln_or = se_ln_or)
+  
+}
+```
+
+## Test it on the complete data
+
+```{r}
+or_cc <- calc_ln_or(data = data, 
+           x = "sex", 
+           y = "flu_ehr")
+
+
+# Estimated Odds Ratio
+exp(or_cc$ln_or)
+
+# 95% Confidence interval
+exp(or_cc$ln_or + c(-1.96, 1.96) * or_cc$se_ln_or)
+
+
+```
+
+## Loop over each imputed data set
+
+```{r}
+# Set up for pooling
+m <- imp_final$m
+Q <- rep(NA, m)
+U <- rep(NA, m)
+
+for (i in 1:m) {
+  
+  ln_or_res <- calc_ln_or(data = complete(imp_final, i), 
+                          x = "sex", 
+                          y = "flu_ehr")
+  
+  
+  Q[i] <- ln_or_res$ln_or
+  
+  U[i] <- (ln_or_res$se_ln_or) ^ 2         # (standard error of estimate)^2
+}
+
+
+```
+
+## Combine using Rubin's Rules and `mice::pool.scalar`
+
+```{r}
+pooled_est <- mice::pool.scalar(Q, U, n = nrow(nhanes), k = 1)  # Barnard-Rubin 1999
+
+pooled_est
+```
+
+## Extra step
+
+Transform the estimates (in this case, exponentiate)
+
+```{r}
+# Estimated pooled Odds Ratio
+exp(pooled_est$qbar)
+
+# 95% Confidence interval
+exp(pooled_est$qbar + c(-1.96, 1.96) * sqrt(pooled_est$t))
+
+```
+
+# Odds ratio with logistic regression
+
+## Complete case
+
+```{r}
+
+or_lr_cc <- glm((flu_ehr == "Yes") ~ sex, 
+                        family = binomial(link = "logit"), 
+                        data = data) %>% 
+  broom::tidy(conf.int = TRUE, exponentiate = TRUE)
+
+or_lr_cc
+
+```
+
+### Multiply-imputed data
+
+```{r}
+
+# Fit model for each imputed data set
+or_lr_mi_fit <- with(imp_final, 
+                     glm((flu_ehr == "Yes") ~ sex, 
+                         family = binomial(link = "logit")))
+
+# Pool the results with mice
+or_lr_mi <- mice::pool(or_lr_mi_fit)
+
+# Clean up the results
+or_lr_mi <- summary(or_lr_mi, conf.int = TRUE, exponentiate = TRUE) 
+or_lr_mi
+
+```
+
+# Compare results
+
+Not the prettiest way to get there, but here the odds ratio results are visulized for each scenario.
+
+```{r}
+tibble::tribble(
+                      ~scenario,                         ~or,                                          ~lower_ci,                                          ~upper_ci,
+     "Complete case, 2x2 table",            exp(or_cc$ln_or),     exp(or_cc$ln_or - 1.96 * or_cc$se_ln_or),     exp(or_cc$ln_or + 1.96 * or_cc$se_ln_or),
+                "MI, 2x2 table",        exp(pooled_est$qbar),   exp(pooled_est$qbar - 1.96 * sqrt(pooled_est$t)),   exp(pooled_est$qbar + 1.96 * sqrt(pooled_est$t)),
+  "Complete case, logistic reg",     or_lr_cc[2, "estimate"][[1]],                            or_lr_cc[2, "conf.low"][[1]],                           or_lr_cc[2, "conf.high"][[1]],
+             "MI, logistic reg",     or_lr_mi[2, "estimate"],                               or_lr_mi[2, "2.5 %"],                              or_lr_mi[2, "97.5 %"]
+  ) %>% 
+  ggplot(data = ., 
+       aes(x = or, 
+           y = scenario)) + 
+  geom_errorbar(aes(xmin = lower_ci, xmax = upper_ci), 
+                width = 0.05) + 
+  geom_point(size = 2) + 
+  scale_x_continuous(trans = "log10", 
+                     breaks = seq(0, 5, 1), 
+                     limits = c(0.1, 5)) +
+  labs(x = "Odds ratio (log scale)",
+       y = "scenario")
+
+
+
+
+
+```
+
+
+
+# Links and references
+
+## Van Buuren's book and package vignette
+
++ [Flexible Imputation of Missing Data, Second Edition](https://stefvanbuuren.name/fimd/)
++ [mice vignette, 2011](https://www.jstatsoft.org/article/view/v045i03)
+
+## R Packages
+
++ [mice: Multivariate Imputation by Chained Equations](https://cran.r-project.org/web/packages/mice/index.html)
++ [tidyverse](https://www.tidyverse.org/)
++ [janitor: Simple Tools for Examining and Cleaning Dirty Data](https://cran.r-project.org/web/packages/janitor/index.html)
++ [skimr: Compact and Flexible Summaries of Data](https://cran.r-project.org/web/packages/skimr/index.html)
++ [VIM: Visualization and Imputation of Missing Values](https://cran.r-project.org/web/packages/VIM/index.html)
++ [naniar](https://cran.r-project.org/web/packages/naniar/index.html)
++ [broom: Convert Statistical Analysis Objects into Tidy Tibbles](https://cran.r-project.org/web/packages/broom/index.html)
+
+## R resources for missing data
+
++ [CRAN Task View: Missing Data](https://cran.r-project.org/web/views/MissingData.html) 
++ [R-miss-tastic](https://rmisstastic.netlify.app/)
+
+## Number of imputations
+
++ [Why You Probably Need More Imputations Than You Think, Allison](https://statisticalhorizons.com/more-imputations)
++ [What Improves with Increased Missing Data Imputations?, Bodner](https://www.researchgate.net/publication/233120848_What_Improves_with_Increased_Missing_Data_Imputations)
+
+

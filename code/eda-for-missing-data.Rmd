@@ -1,0 +1,532 @@
+---
+title: "Exploratory data anlayis (EDA) of missing data"
+subtitle: "CSP 2021"
+author: "Emile Latour"
+date: "February 17, 2021"
+output: 
+  slidy_presentation: 
+    theme: yeti
+    highlight: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = TRUE,  
+  tidy       = FALSE, 
+  dpi        = 96,  
+  fig.width  = 7,  
+  fig.height = 5,  
+  out.width  = "70%",  
+  fig.align  = "center", 
+  dev = "png", 
+  NULL
+)
+
+
+```
+
+# Load the packages
+
+Here we load that packages that we will be using during the analysis. See section titled "Links and references" for more info on the packages
+
+```{r load-packages, message=FALSE, warning=FALSE}
+
+library(tidyverse)       # packages ggplot2, dplyr, tidyr, readr, purrr, tibble, 
+# stringr, and forcats
+library(broom)           # functions tidy(), glance(), augment()
+library(janitor)         # for working with dirty data 
+library(here)            # simpler way to find your files
+library(skimr)           # Compact and Flexible Summaries of Data
+
+library(mice)            # Multiple imputation using Fully Conditional Specification
+library(naniar)          # structures, summaries, and visualizations for missing data 
+library(VIM)             # Visualization and Imputation of Missing Values
+library(finalfit)        # Check for associations between missing and observed data.
+```
+
+# The data
+
+A simulated data set of Medicaid enrollment data that has been matched with Electronic Health Records (EHR) for the purposes of comparing the Medicaid claims data with the EHR to ensure accuracy/agreement.
+
+The data contains:
+
++ Demographic information: age, sex, race, ethnicity, language spoken, and Federal poverty level status (FPL).
++ Eligible (Yes/No) for Breast cancer screening, Cholesterol screening, and Flu vaccine. 
++ Received (Yes/No) according to Medicaid data for each. 
++ Received (Yes/No) according to EHR data for each. 
++ Total cholesterol values for those that received cholesterol screening in the EHR.
+
+## Based on real data
+
+To provide a practical real-world example, he data used here was based on an actual data set, but due to complications with using patient data and privacy, all data here has been simulated and similarities to the original data are unintentional.
+
+# Data preparation
+
+## Load the data
+
+Using the `here` package to construct the path to the data set. Specifying the column types ahead of time.
+
+```{r load_data}
+data <- readr::read_csv(
+  file = here::here("data", 
+                    "ehr-and-claims_simulated-data_csp-2021.csv"), 
+  col_types = cols(pat_id = col_character(),
+                   age = col_double(),
+                   sex = col_character(),
+                   race_eth = col_character(),
+                   language = col_character(),
+                   fpl = col_character(),
+                   age_f = col_character(),
+                   breast_eligibility = col_double(),
+                   flu_eligibility = col_double(),
+                   cholesterol_eligibility = col_double(),
+                   breast_claims = col_double(),
+                   flu_claims = col_double(),
+                   cholesterol_claims = col_double(),
+                   breast_ehr = col_double(),
+                   flu_ehr = col_double(),
+                   cholesterol_ehr = col_double(), 
+                   cholesterol_total = col_double()))
+
+```
+
+
+## Take a peak
+
+Take note of 
+
++ The number of rows and columns, 
++ Variable names, 
++ Types of variables, 
++ Some of the data values
+
+```{r}
+dplyr::glimpse(data)
+```
+
+## Light data cleaning
+
+Convert coded variables to `factor` type.
+
+```{r}
+data <- data %>% 
+  mutate(sex = factor(sex, 
+                      levels = c("Female", "Male")), 
+         race_eth = factor(race_eth, 
+                           levels = c("Hispanic",
+                                      "Non-Hispanic, Black",
+                                      "Non-Hispanic, Other",
+                                      "Non-Hispanic, White")),
+         language = factor(language, 
+                           levels = c("English", 
+                                      "Spanish", 
+                                      "Other")),
+         fpl = factor(fpl, 
+                      levels = c("<=138% FPL", 
+                                 ">138% FPL")), 
+         age_f = factor(age_f, 
+                        levels = c("19-<34", 
+                                   "35-<50", 
+                                   "51-<64")), 
+         dplyr::across(.cols = dplyr::ends_with("_eligibility"), 
+                       .fns = ~ factor(., 
+                                       levels = c(1, 0), 
+                                       labels = c("Yes", "No"))), 
+         dplyr::across(.cols = dplyr::ends_with("_claims"), 
+                       .fns = ~ factor(., 
+                                       levels = c(1, 0), 
+                                       labels = c("Yes", "No"))), 
+         dplyr::across(.cols = dplyr::ends_with("_ehr"), 
+                       .fns = ~ factor(., 
+                                       levels = c(1, 0), 
+                                       labels = c("Yes", "No")))
+  )
+
+# Good step I always do to ensure consistent, clean naming conventions
+data <- data %>% 
+  janitor::clean_names()
+```
+
+## One more peak
+
+Take another glimpse at the data and note how the values have changed.
+
+```{r}
+dplyr::glimpse(data)
+
+```
+
+# Skim the data
+
+`skimr::skim()` is a nice alternative to the base R function `summary()`. Though it doesn't always play nicely depending on your operating system...
+
+```{r}
+# With spark graphs if system allows
+# skimr::skim(data)
+
+# Without spark graphs
+skimr::skim_without_charts(data)
+```
+
+# Explore missingness
+
+When working with missing data in R, there are lots of packages that can be really helpful. [mice](https://www.gerkovink.com/miceVignettes/Missingness_inspection/Missingness_inspection.html) has some great functions that Van Buuren highlights. The [`VIM`](https://cran.r-project.org/web/packages/VIM/index.html) package has some great tools as well. My preference is to use the [`naniar`](https://cran.r-project.org/web/packages/naniar/index.html) package for inspecting missingness.
+
+## `naniar`
+
+The naniar package provides a number of visual summaries that I find helpful, in addition, there are some very nice clean numeric summaries as well.
+
+With all my data sets, I will examine an missingness plot and a sorted/clustered version to get an overview of any missingness problems in my data. 
+
+# Missingness plot 
+
+## Unsorted
+
+```{r}
+data %>% 
+  naniar::vis_miss()
+
+```
+
+## Sorted and clustered
+
+```{r}
+data %>% 
+  naniar::vis_miss(., 
+                   sort_miss = TRUE, 
+                   cluster = TRUE)
+
+```
+
+## Clustered, sorted, and filtered
+
+With really large data sets, I will filter to just the variables with any missingness prior to making this plot, or filter to just the relevant data since with large data this figure can get messy.
+
+Also, the options in `naniar::vis_miss()` to _cluster_ and to _sort_ the data are really helpful.
+
+```{r}
+data %>% 
+  dplyr::select_if(.tbl = ., 
+                   .predicate = naniar::any_na) %>% 
+  naniar::vis_miss(., 
+                   cluster = TRUE, 
+                   sort_miss = TRUE)
+
+```
+
+# Upset plot
+
+Visualization to further explore the patterns of missingness, specifically the combinations (i.e. intersections) of missing values across cases.
+
+```{r}
+data %>% 
+  naniar::gg_miss_upset(., 
+                        nsets = 6)
+
+```
+
+
+# Numeric summaries
+
+I addition to visualizing missingness, it's important to quantify the missingness of the data: 
+
++ Number and percentage of records/cases (rows) with missing data
++ Number and percentage of variables (columns) with missing data
++ Number and percentage of cells with missing data
+
+# Complete and incomplete cases
+
+Number and percentage of complete / missing cases
+
+```{r}
+data %>% 
+  summarise(n_complete = sum(stats::complete.cases(.)), 
+            pct_complete = 100 * naniar::prop_complete_case(.), 
+            n_missing = sum(!stats::complete.cases(.)), 
+            pct_missing = 100 * naniar::prop_miss_case(.))
+
+```
+
+# Complete and incomplete cases
+
+How many missing values does each case have?
+
+```{r}
+data %>% 
+  naniar::miss_case_table()
+
+```
+
+# Missingness by variable
+
+The number and percentage of missing values for each variable / column
+
+```{r}
+data %>% 
+  naniar::miss_var_summary() %>% 
+  dplyr::filter(n_miss > 0)  # Filter to just those variables with non-zero number of missing
+
+```
+
+
+# Complete and incomplete values in the data
+
+```{r}
+
+data %>% 
+  naniar::miss_prop_summary()
+```
+
++ 7.5% of values in the data are missing
++ 35.3% of variables (columns) have at least one missing value
++ 41.4% of cases (rows) have at least one missing value.
+
+# `VIM`
+
+The VIM package is very useful for missingness EDA. In one figure below, we get information about the missingness by variable and good information about the patterns.
+
+```{r, fig.width=10, out.width="70%"}
+data %>% 
+  VIM::aggr(., 
+            col = c("gray", "gray29"), 
+            numbers = TRUE, 
+            sortVars = TRUE, 
+            labels = names(.), 
+            only.miss = TRUE, 
+            cex.axis = .7, 
+            gap = 3, 
+            ylab = c("Histogram of missing data","Pattern"))
+```
+
+## Filtered to just columns with missing
+
+With this one it can also be helpful to select on the columns with missing data first and examine the patterns.
+
+```{r, fig.width=10, out.width="70%"}
+data %>% 
+  dplyr::select_if(.tbl = ., 
+                   .predicate = naniar::any_na) %>% 
+  VIM::aggr(., 
+            col = c("gray", "gray29"), 
+            numbers = TRUE, 
+            sortVars = TRUE, 
+            labels = names(.), 
+            cex.axis = .7, 
+            gap = 3, 
+            ylab = c("Histogram of missing data","Pattern"))
+```
+
+# `mice` 
+
+The `mice` package will be used for imputation later. It's also got some handy tools for exploring the missingness in data sets.
+
+The functions in `mice` for EDA mostly help when deciding what variables may or may not be good predictors in the imputation models.
+
+
+# Pattern
+
+Numeric and visual representation of the pattern. Doesn't always print well for me. Looks better in R/Rstudio console
+
++ Left = Number of cases/rows with a pattern
++ Right = Number of missing columns
+
+```{r, fig.width=8, out.width="70%"}
+data %>% 
+  mice::md.pattern(., 
+                   rotate.names = TRUE)
+```
+
+# Pattern 
+
+Again, a little easier to look at this with just the columns that have any missing values.
+
+```{r, fig.width=8, out.width="70%"}
+data %>% 
+  dplyr::select_if(.tbl = ., 
+                   .predicate = naniar::any_na) %>% 
+  mice::md.pattern(., 
+                   rotate.names = TRUE)
+```
+
+# Missingness pairs
+
+Four missingness patterns:
+
++ `rr` both are observed,
++ `rm` first (left) variable is observed, the second (top) is missing,
++ `mr` first (left) variable is missing, the second (top) is observed, and
++ `mm` both variable are missing.
+
+```{r}
+mssng_pairs <- data %>% 
+  dplyr::select_if(.tbl = ., 
+                   .predicate = naniar::any_na) %>% 
+  mice::md.pairs(.)
+
+mssng_pairs
+
+```
+
+# Proportion of usable cases
+
+Measures how many cases with missing data on the target variable actually have observed values on the predictor. The proportion will be low if both target and predictor are missing on the same cases.
+
+Target on the vertical axis (i.e. left), predictor on the horizontal (i.e. top).
+
+Interpret: Of the records with values for predictor, xx% have observed information on target variable. Etc.
+
+This gives a sense of what variables may be good to include/exclude in the imputation model. Higher % indicates more information and likely good predictor; lower % indicates that the variables are missing for the same observations and may not be good predictor.
+
+```{r}
+prop_usable_cases <- mssng_pairs %>% 
+  with(., 
+       round(mr / (mr + mm), digits = 3))
+
+prop_usable_cases
+
+```
+
++ `race_eth` look like good predictors for `age` (96.6%). 
++ `race_eth` look like good predictors for `sex` (96.7%). 
++ `age` and `sex` look like good predictors for `race_eth` (88.0% and 92.2%).
++ `age` and `sex` and `race_eth` look like good predictors for `fpl` (89.5% and 93.1% and 95.8%).
+
+# Outbound statistic
+
+How observed data in a variable connect to missing data in the rest of the data. 
+
+Here lower is better. Looking at the top line for `age`: `sex` and `race_eth` may be better predictors than `fpl`.
+
+```{r}
+mssng_pairs %>% 
+  with(., 
+       round(rm / (rm + rr), digits = 3))
+
+
+```
+
+# Influx and Ouflux 
+
+Two overall measures of how each variable connects to the others. Van Buuren says:
+
+> For two variables with the same proportion of missing data, the variable with higher influx is better connected to the observed data, and might thus be easier to impute.
+
+> For two variables having the same proportion of missing data, the variable with higher outflux is better connected to the missing data, and thus potentially more useful for imputing other variables.
+
+> Influx and outflux are summaries of the missing data pattern intended to aid in the construction of imputation models. Keeping everything else constant, variables with high influx and outflux are preferred.
+
+See Van Buuren for details on these ([link](https://stefvanbuuren.name/fimd/missing-data-pattern.html))
+
+```{r}
+mice::flux(data)[, 1:3]
+```
+
+# Influx and Outflux
+
+Visualization of influx and outflux. Again, from Van Buuren:
+
+> In general, variables that are located higher up in the display are more complete and thus potentially more useful for imputation. ...in practice variables closer to the subdiagonal are typically better connected than those farther away. The fluxplot can be used to spot variables that clutter the imputation model. Variables that are located in the lower regions (especially near the lower-left corner) and that are uninteresting for later analysis are better removed from the data prior to imputation.
+
+```{r}
+mice::fluxplot(data)
+```
+
+
+`race_eth` and `sex` appear useful for imputation, but `fpl` and `age` do not. `cholesterol_total` doesn't look very helpful.
+
+# `finalfit`
+
+Just recently came across this package. There is a very nice article about the functions available for working with missing data ([link](https://finalfit.org/articles/missing.html)). 
+
+Here I want to highlight two very helpful ways the package can help to see if the data is missing for any particular reason. 
+
+According to the authors:
+
+> In deciding whether data is MCAR or MAR, one approach is to explore patterns of missingness between levels of included variables. This is particularly important (I would say absolutely required) for a primary outcome measure / dependent variable.
+
+# `missing_pairs`
+
+Visually check for different missingness across levels of the variables in the data set.
+
+```{r, fig.width=7, fig.height=7}
+
+data %>% 
+  finalfit::missing_pairs(dependent = "sex", 
+                          explanatory = c("age",
+                                          "race_eth",
+                                          "language",
+                                          "breast_claims",
+                                          "flu_claims",
+                                          "cholesterol_claims",
+                                          "breast_ehr",
+                                          "flu_ehr",
+                                          "cholesterol_ehr", 
+                                          "cholesterol_total"), 
+                          position = "fill")
+
+
+```
+
+# `missing_compare`
+
+Check associations with missingness (observed or missing) of a particular variable. Some justification here to assume MAR and not MCAR. No way to tell MCAR here.
+
+```{r}
+data %>% 
+  finalfit::missing_compare(dependent = "sex", 
+                            explanatory = c("age",
+                                            "race_eth",
+                                            "language",
+                                            "breast_claims",
+                                            "flu_claims",
+                                            "cholesterol_claims",
+                                            "breast_ehr",
+                                            "flu_ehr",
+                                            "cholesterol_ehr", 
+                                            "cholesterol_total")) %>% 
+  knitr::kable(row.names=FALSE, align = c("l", "l", "r", "r", "r"))
+```
+
+# `missing_compare`
+
+Check associations with missingness (observed or missing) of a particular variable. Some justification here to assume MAR and not MCAR. No way to tell MCAR here.
+
+```{r}
+data %>% 
+  finalfit::missing_compare(dependent = "race_eth", 
+                            explanatory = c("sex", 
+                                            "age",
+                                            "language",
+                                            "breast_claims",
+                                            "flu_claims",
+                                            "cholesterol_claims",
+                                            "breast_ehr",
+                                            "flu_ehr",
+                                            "cholesterol_ehr", 
+                                            "cholesterol_total")) %>% 
+  knitr::kable(row.names=FALSE, align = c("l", "l", "r", "r", "r"))
+```
+
+# References and links
+
+## Packages
+
+### General purpose / very, very useful
+
++ [tidyverse](https://www.tidyverse.org/)
++ [broom](https://cran.r-project.org/web/packages/broom/index.html)
++ [janitor](https://cran.r-project.org/web/packages/janitor/index.html) 
++ [here](https://cran.r-project.org/web/packages/here/index.html)
++ [skimr](https://cran.r-project.org/web/packages/skimr/index.html)
+
+### Missing data EDA
+
++ [mice](https://cran.r-project.org/web/packages/mice/mice.pdf)
++ [naniar](https://cran.r-project.org/web/packages/naniar/index.html)
++ [VIM](https://cran.r-project.org/web/packages/VIM/index.html)
++ [finalfit](https://finalfit.org/articles/missing.html)
+
+## Books
+
++ [Flexible Imputaion of Missing Data, Van Buuren](https://stefvanbuuren.name/fimd/) with [this specific section on missing data pattern](https://stefvanbuuren.name/fimd/missing-data-pattern.html)
