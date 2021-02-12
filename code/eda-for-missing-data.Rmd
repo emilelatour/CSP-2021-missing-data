@@ -1,5 +1,5 @@
 ---
-title: "Exploratory data anlayis (EDA) of missing data"
+title: "Exploratory data analysis (EDA) of missing data"
 subtitle: "CSP 2021"
 author: "Emile Latour"
 date: "February 17, 2021"
