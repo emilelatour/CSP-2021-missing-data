@@ -6,7 +6,7 @@ date: "February 17, 2021"
 output: 
   slidy_presentation: 
     theme: yeti
-    highlight: default
+    highlight: tango
 ---
 
 
@@ -32,7 +32,7 @@ Here we load that packages that we will be using during the analysis. See sectio
 ```{r load-packages, message=FALSE, warning=FALSE}
 
 library(tidyverse)       # packages ggplot2, dplyr, tidyr, readr, purrr, tibble, 
-# stringr, and forcats
+                         # stringr, and forcats
 library(broom)           # functions tidy(), glance(), augment()
 library(janitor)         # for working with dirty data 
 library(here)            # simpler way to find your files
@@ -648,14 +648,14 @@ ggplot(data = imp_long,
 Once you are settled on the imputation model and reviewed the process for convergence, you are ready to create the multiple imputations. Double check your inputs, increase the number of imputations to perform.
 
 ```{r, eval=FALSE}
-  imp_final <- mice::mice(data = data, 
-                          m = 40,             # number of imputations, dflt = 5
-                          method = meth,           # specify the method
-                          predictorMatrix = pred_guess, 
-                          visitSequence = visit_order, 
-                          seed = seed_for_imp, 
-                          maxit = 20,        # number of iterations, dflt = 5
-                          print = FALSE)
+imp_final <- mice::mice(data = data, 
+                        m = 40,             # number of imputations, dflt = 5
+                        method = meth,           # specify the method
+                        predictorMatrix = pred_guess, 
+                        visitSequence = visit_order, 
+                        seed = seed_for_imp, 
+                        maxit = 20,        # number of iterations, dflt = 5
+                        print = FALSE)
 #    user  system elapsed 
 # 450.477  61.924 515.250
 ```
@@ -706,9 +706,9 @@ Also covered in Van Buuren: [vignette](https://www.jstatsoft.org/article/view/v0
 
 Here we will look at:
 
-+ Calculating Kappa statistics which need to be done by hand
-+ Calculating an Odds Ratio by hand with a 2x2 table
-+ Calculating an Odds Ratio using logistic regression and `mice`
+  + Calculating Kappa statistics which need to be done by hand
+  + Calculating an Odds Ratio by hand with a 2x2 table
+  + Calculating an Odds Ratio using logistic regression and `mice`
 
 # Kappa
 
@@ -843,6 +843,10 @@ pooled_est$qbar
 pooled_est$qbar + c(-1.96, 1.96) * sqrt(pooled_est$t)
 ```
 
+## From the documentation, all the components
+
+Here we are only interested in a few of the components.
+
 Per `?mice::pool.scalar`, returns a list with components: 
 
 + `m` is the number of imputations. 
@@ -854,7 +858,7 @@ Per `?mice::pool.scalar`, returns a list with components:
 + `t` is the total variance of the pooled estimated, formula (3.1.5) Rubin (1987). 
 + `r` is the relative increase in variance due to nonresponse, formula (3.1.7) Rubin (1987). 
 + `df` is the degrees of freedom for t reference distribution, formula (3.1.6) Rubin (1987) or method of Barnard-Rubin (1999) (if method = "smallsample"). 
-+ `Component `fmi` is the fraction missing information due to nonresponse, formula (3.1.10) Rubin (1987).
++ `Component` fmi is the fraction missing information due to nonresponse, formula (3.1.10) Rubin (1987).
 
 # Compare with complete case analysis
 
@@ -976,8 +980,8 @@ calc_ln_or <- function(data, x, y) {
 
 ```{r}
 or_cc <- calc_ln_or(data = data, 
-           x = "sex", 
-           y = "flu_ehr")
+                    x = "sex", 
+                    y = "flu_ehr")
 
 
 # Estimated Odds Ratio
@@ -1040,8 +1044,8 @@ exp(pooled_est$qbar + c(-1.96, 1.96) * sqrt(pooled_est$t))
 ```{r}
 
 or_lr_cc <- glm((flu_ehr == "Yes") ~ sex, 
-                        family = binomial(link = "logit"), 
-                        data = data) %>% 
+                family = binomial(link = "logit"), 
+                data = data) %>% 
   broom::tidy(conf.int = TRUE, exponentiate = TRUE)
 
 or_lr_cc
@@ -1068,19 +1072,19 @@ or_lr_mi
 
 # Compare results
 
-Not the prettiest way to get there, but here the odds ratio results are visulized for each scenario.
+Not the prettiest way to get there... Here, from each scenario, I pull out the odds ratios and confidence intervals for visualization.
 
 ```{r}
 tibble::tribble(
-                      ~scenario,                         ~or,                                          ~lower_ci,                                          ~upper_ci,
-     "Complete case, 2x2 table",            exp(or_cc$ln_or),     exp(or_cc$ln_or - 1.96 * or_cc$se_ln_or),     exp(or_cc$ln_or + 1.96 * or_cc$se_ln_or),
-                "MI, 2x2 table",        exp(pooled_est$qbar),   exp(pooled_est$qbar - 1.96 * sqrt(pooled_est$t)),   exp(pooled_est$qbar + 1.96 * sqrt(pooled_est$t)),
+  ~scenario,                         ~or,                                          ~lower_ci,                                          ~upper_ci,
+  "Complete case, 2x2 table",            exp(or_cc$ln_or),     exp(or_cc$ln_or - 1.96 * or_cc$se_ln_or),     exp(or_cc$ln_or + 1.96 * or_cc$se_ln_or),
+  "MI, 2x2 table",        exp(pooled_est$qbar),   exp(pooled_est$qbar - 1.96 * sqrt(pooled_est$t)),   exp(pooled_est$qbar + 1.96 * sqrt(pooled_est$t)),
   "Complete case, logistic reg",     or_lr_cc[2, "estimate"][[1]],                            or_lr_cc[2, "conf.low"][[1]],                           or_lr_cc[2, "conf.high"][[1]],
-             "MI, logistic reg",     or_lr_mi[2, "estimate"],                               or_lr_mi[2, "2.5 %"],                              or_lr_mi[2, "97.5 %"]
-  ) %>% 
+  "MI, logistic reg",     or_lr_mi[2, "estimate"],                               or_lr_mi[2, "2.5 %"],                              or_lr_mi[2, "97.5 %"]
+) %>% 
   ggplot(data = ., 
-       aes(x = or, 
-           y = scenario)) + 
+         aes(x = or, 
+             y = scenario)) + 
   geom_errorbar(aes(xmin = lower_ci, xmax = upper_ci), 
                 width = 0.05) + 
   geom_point(size = 2) + 

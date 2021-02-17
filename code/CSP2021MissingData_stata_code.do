@@ -62,8 +62,8 @@ restore
 preserve
 
 *Create missing age indicator
-generate age_missing=1
-replace age_missing=0 if age==.
+generate age_missing=0
+replace age_missing=1 if age==.
 
 *Set all missing ages to 0
 replace age=0 if age==.
@@ -114,7 +114,7 @@ restore
 *R-Squared example
 **************************
 
-*install mibeta to extraact R-square from MI results (Run code, click on link, and click install)
+*install mibeta to extract R-square from MI results (Run code, click on link, and click install)
 findit mibeta
 
 *Declare the storage style
@@ -132,12 +132,14 @@ add (10) rseed(2021)
 mi estimate: regress cholesterol_total age i.sex_binary i.race_eth_n i.language_n i.fpl_binary
 
 *Estimate multiply-imputed R-square
-mibeta cholesterol_total age i.sex_binary i.race_eth_n i.language_n i.fpl_binary
+mibeta cholesterol_total age i.sex_binary i.race_eth_n i.language_n i.fpl_binary, fisherz
 
 **************************
 *R-Squared example: BY HAND
 **************************
 
+*See the following URL for a good Stata Example: 
+*https://stats.idre.ucla.edu/stata/faq/how-can-i-estimate-r-squared-for-a-model-estimated-with-multiply-imputed-data/
 
 
 
@@ -152,32 +154,6 @@ mibeta cholesterol_total age i.sex_binary i.race_eth_n i.language_n i.fpl_binary
 
 
 
-
-
-
-
-
-**************************
-*Correlation example
-**************************
-
-*Preserve the data because we will manipulate. We want to revert back
-preserve
-
-*Subset to patients with a cholesterol screening
-keep if cholesterol_ehr==1
-
-*Scatter plot of total cholesterol and age
-scatter cholesterol_total age
-
-*Estimate summary statistics for total cholesterol and age
-sum cholesterol_total age 
-
-*Estimate Pearson's correlation of total cholesterol and age (add in significance and N)
-pwcorr cholesterol_total age, sig obs
-
-*restore the data to its original form
-restore
 
 
 

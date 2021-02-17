@@ -6,7 +6,8 @@ date: "February 17, 2021"
 output: 
   slidy_presentation: 
     theme: yeti
-    highlight: default
+    highlight: tango
+    df_print: kable
 ---
 
 
@@ -33,7 +34,7 @@ Here we load that packages that we will be using during the analysis. See sectio
 ```{r load-packages, message=FALSE, warning=FALSE}
 
 library(tidyverse)       # packages ggplot2, dplyr, tidyr, readr, purrr, tibble, 
-# stringr, and forcats
+                         # stringr, and forcats
 library(broom)           # functions tidy(), glance(), augment()
 library(janitor)         # for working with dirty data 
 library(here)            # simpler way to find your files
@@ -59,7 +60,7 @@ The data contains:
 
 ## Based on real data
 
-To provide a practical real-world example, he data used here was based on an actual data set, but due to complications with using patient data and privacy, all data here has been simulated and similarities to the original data are unintentional.
+To provide a practical real-world example, the data used here is based on an actual data set. But due to complications with using patient data and due to issues around privacy, __all data here has been simulated and similarities to the original data are unintentional__.
 
 # Data preparation
 
@@ -171,7 +172,10 @@ skimr::skim_without_charts(data)
 
 # Explore missingness
 
-When working with missing data in R, there are lots of packages that can be really helpful. [mice](https://www.gerkovink.com/miceVignettes/Missingness_inspection/Missingness_inspection.html) has some great functions that Van Buuren highlights. The [`VIM`](https://cran.r-project.org/web/packages/VIM/index.html) package has some great tools as well. My preference is to use the [`naniar`](https://cran.r-project.org/web/packages/naniar/index.html) package for inspecting missingness.
+When working with missing data in R, there are lots of packages that can be really helpful. 
++ [`mice`](https://www.gerkovink.com/miceVignettes/Missingness_inspection/Missingness_inspection.html) has some great functions that Van Buuren highlights. 
++ The [`VIM`](https://cran.r-project.org/web/packages/VIM/index.html) package has some great tools as well. 
++ My preference is to use the [`naniar`](https://cran.r-project.org/web/packages/naniar/index.html) package for inspecting missingness.
 
 ## `naniar`
 
@@ -180,6 +184,8 @@ The naniar package provides a number of visual summaries that I find helpful, in
 With all my data sets, I will examine an missingness plot and a sorted/clustered version to get an overview of any missingness problems in my data. 
 
 # Missingness plot 
+
+The `naniar::vis_miss()` function.
 
 ## Unsorted
 
@@ -250,7 +256,7 @@ data %>%
 
 # Complete and incomplete cases
 
-How many missing values does each case have?
+How many missing values does each case / row have?
 
 ```{r}
 data %>% 
@@ -280,7 +286,22 @@ data %>%
 
 + 7.5% of values in the data are missing
 + 35.3% of variables (columns) have at least one missing value
-+ 41.4% of cases (rows) have at least one missing value.
++ 78.5% of cases (rows) have at least one missing value.
+
+## Without `cholesterol_total`
+
+`cholesterol_total` is only available for those marked "Yes" for having cholesterol screening in the EHR data. So those marked "No" are missing `cholesterol_total` and we need to be careful when describing the missingness in the data to take this into account.
+
+```{r}
+
+data %>% 
+  dplyr::select(-cholesterol_total) %>% 
+  naniar::miss_prop_summary()
+```
+
++ 4.1% of values in the data are missing
++ 31.2% of variables (columns) have at least one missing value
++ 39.2% of cases (rows) have at least one missing value.
 
 # `VIM`
 
