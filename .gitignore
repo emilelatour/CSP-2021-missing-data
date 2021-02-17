@@ -37,4 +37,9 @@ vignettes/*.pdf
 
 # R Environment Variables
 .Renviron
+
+# Mac sysytem variables
 .DS_Store
+
+# Power point slides with instructor notes. PDF version will be available for attendees
+.pptx
